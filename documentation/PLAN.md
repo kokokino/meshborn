@@ -1,0 +1,521 @@
+# Meshborn Development Plan
+
+## Context
+
+Meshborn is a Kokokino spoke app that generates TalkingHead-ready 3D avatars from text prompts or images. The output is a GLB file with split lips, teeth, tongue, eyes, 52 ARKit blend shapes, 15 Oculus visemes, a Mixamo-compatible rig, and animations. The spoke skeleton (SSO, subscriptions, chat) is already built. This plan covers the avatar pipeline.
+
+The key insight from the brainstorming phase: **MPFB2 (MakeHuman Plugin For Blender 2)** eliminates the hardest problems. Mika Suominen (met4citizen), who created TalkingHead, also contributed the exact MPFB2 asset packs needed for TalkingHead compatibility. The blend shape problem is already solved.
+
+---
+
+## Key Architectural Decisions
+
+| Decision | Choice | Why |
+|----------|--------|-----|
+| Template system | **MPFB2** from makehumancommunity.org | Parametric humanoids with ARKit + viseme shape keys built in. Eliminates need for manual templates, ICT FaceKit, deformation transfer |
+| 3D generation (post-MVP) | **Trellis v2** (MIT license) | Cleaner topology, more permissive license than Hunyuan3D |
+| Image generation | **HiDream-I1** (MIT license) | Best prompt adherence, fully commercial-friendly |
+| Blender version | **Blender 5 always** | Runs in cloud containers only. No local Blender |
+| Container runtime | **Podman** | Rootless, daemonless, drop-in Docker replacement |
+| Container registry | **Quay.io** | Red Hat's OCI registry, pairs naturally with Podman |
+| GPU compute | **RunPod Serverless** | Pay-per-second, scales to zero, shared by dev and prod |
+| File storage | **Backblaze B2** | S3-compatible, follows backlog-beacon pattern with AWS SDK |
+| 3D viewer | **Babylon.js v8** | Kokokino standard. GLB morph target support built in |
+| Dev philosophy | **Cloud services everywhere** | Same RunPod endpoints for dev and prod. No crippled local models |
+
+---
+
+## System Architecture
+
+```
+                YOUR DEV MACHINE
+                Code + Meteor local dev + Git
+                NO local Blender, NO local ML models
+                        │
+          ┌─────────────┴──────────────┐
+          │ deploy                     │ podman push
+          ▼                            ▼
+  ┌────────────────────┐    ┌──────────────────────────────┐
+  │  METEOR GALAXY     │    │  RUNPOD SERVERLESS           │
+  │  meshborn.koko...  │◄──►│  (shared by dev + prod)      │
+  │                    │    │                              │
+  │  Mithril.js UI     │    │  EP1: MPFB2 + Blender 5     │
+  │  Babylon.js viewer │    │   Character generation       │
+  │  Pipeline orch.    │    │                              │
+  │  MongoDB           │    │  EP2: HiDream-I1             │
+  │  SSO via Hub       │    │   Concept image generation   │
+  │                    │    │                              │
+  └────────┬───────────┘    │  EP3: Trellis v2 (post-MVP)  │
+           │                │   Image → 3D mesh            │
+           ▼                │                              │
+  ┌────────────────────┐    │  EP4: UniRig (post-MVP)      │
+  │  BACKBLAZE B2      │    │   Auto-rigging               │
+  │  Avatar storage    │    └──────────────────────────────┘
+  │  Intermediate files│
+  │  Params for remix  │
+  └────────────────────┘
+```
+
+Both dev (localhost:3010) and production (meshborn.kokokino.com) call the same RunPod endpoints and write to the same B2 bucket (with environment-prefixed paths).
+
+---
+
+## The MPFB2 Template Pipeline (MVP)
+
+This is the core pipeline. MPFB2 + Mika Suominen's asset packs handle the entire chain from parametric humanoid to TalkingHead-ready GLB.
+
+### Pipeline Stages
+
+```
+1. USER INPUT
+   Text prompt or image
+        │
+        ▼
+2. PROMPT DECOMPOSITION (Meteor server, Claude API)
+   Parse into MPFB2 parameters + appearance description
+   Output: { bodyParams, faceParams, ethnicity, age, style, ... }
+        │
+        ▼
+3. HERO IMAGE (RunPod: HiDream-I1)
+   Generate full-body character concept on white bg
+   Generate face close-up for texture detail
+   User approves or requests changes
+        │
+        ▼
+4. CHARACTER GENERATION (RunPod: MPFB2 + Blender 5)
+   a. MPFB2 generates parametric humanoid
+      - Body shape, face shape, ethnicity, age via API
+   b. MPFB2 adds system assets
+      - Eyes, teeth, tongue, eyelashes (separate mesh objects)
+   c. MPFB2 adds Mixamo rig
+   d. MPFB2 loads Faceunits 01
+      - 52 ARKit blend shape keys on basemesh
+   e. MPFB2 loads Visemes 02 (Meta/Oculus)
+      - 15 Oculus viseme shape keys: viseme_aa, viseme_CH, viseme_sil, etc.
+   f. Save params.json for future remixing
+        │
+        ▼
+5. TEXTURE PROJECTION (RunPod: Blender 5)
+   Project HiDream face close-up onto MPFB2 mesh UV
+   Project body appearance onto body UV islands
+   Bake to texture map
+        │
+        ▼
+6. EXPORT (RunPod: Blender 5)
+   Export as GLB with all morph targets
+   Generate thumbnail (256x256)
+   Upload GLB + assets to Backblaze B2
+        │
+        ▼
+7. DELIVERY
+   Babylon.js loads GLB in browser
+   User can preview, download, or use in TalkingHead
+```
+
+### MPFB2 Asset Packs
+
+Install **all available MakeHuman/MPFB2 asset packs** in the container from the start. More variety from day one; the container image will be larger but this avoids repeated rebuilds as we discover needs.
+
+**Critical packs (TalkingHead compatibility)**:
+
+| Pack | Creator | License | Purpose |
+|------|---------|---------|---------|
+| **Faceunits 01 (ARKit)** | Mika Suominen (met4citizen) | CC0 | 52 ARKit facial expression shape keys |
+| **Visemes 02 (Meta/Oculus)** | Mika Suominen (met4citizen) | CC0 | 15 Oculus viseme shape keys for lip-sync |
+| **Visemes 01 (Microsoft)** | Mika Suominen (met4citizen) | CC0 | Microsoft visemes for broader compatibility |
+| System assets (eyes, teeth, tongue, eyelashes) | MPFB2 core | CC0 | Separate mesh objects |
+
+**Additional packs (all available)**: clothing, hair, body morphs, skins, targets, etc. These expand character variety and give users more customization options. Bake all packs into the Blender container image so they're available without runtime downloads.
+
+### Why This Works
+
+The previous brainstorming docs treated blend shape creation as "the hardest unsolved problem." MPFB2 makes it a configuration step:
+
+- **No ICT FaceKit** needed (MPFB2 has its own shape key system)
+- **No deformation transfer** needed (shape keys are applied directly to the basemesh)
+- **No manual template creation** (MPFB2 generates parametric humanoids procedurally)
+- **No separate rigging step** (MPFB2 adds Mixamo rig natively)
+- **Separate mesh objects** come free (eyes, teeth, tongue are separate by design in MPFB2)
+
+---
+
+## AI Mesh Path (Post-MVP — Trellis v2)
+
+Deferred to after the MPFB2 template pipeline is working. This path generates truly novel body shapes that MPFB2 templates can't cover.
+
+```
+HiDream concept image
+    → Trellis v2 (image → 3D mesh, MIT license)
+    → Retopology (Instant Meshes CLI + Blender cleanup)
+    → Face component separation (MediaPipe landmarks)
+    → UniRig (auto-skeleton + skinning, MIT license)
+    → Deformation transfer (ARKit blend shapes from reference)
+    → GLB export
+```
+
+This path may revisit ICT FaceKit and deformation transfer. Higher risk, higher novelty. The template pipeline fallback ensures users always get a working avatar even if the AI path fails quality checks.
+
+---
+
+## Cloud Infrastructure (RunPod Serverless)
+
+All GPU compute runs on RunPod Serverless. Same endpoints for development and production.
+
+### Containers (built with Podman, pushed to Quay.io)
+
+#### Container 1: MPFB2 + Blender 5 (workhorse)
+```
+Base: ubuntu:24.04
++ Blender 5.0 headless
++ MPFB2 addon installed
++ ALL MakeHuman/MPFB2 asset packs (faceunits, visemes, clothing, hair, skins, targets, etc.)
++ Python deps: numpy, scipy, runpod
++ Pipeline scripts
+Registry: quay.io/kokokino/meshborn-blender:latest
+GPU: CPU-only endpoint (~$0.20/hr) or GPU for rendering
+```
+
+Handles: character generation, texture projection, GLB export, thumbnail rendering.
+
+#### Container 2: HiDream-I1
+```
+Base: pytorch/pytorch:2.4.0-cuda12.4-cudnn9-runtime
++ HiDream-I1-Dev (baked weights)
++ diffusers, transformers, accelerate, runpod, rembg
+Registry: quay.io/kokokino/meshborn-hidream:latest
+GPU: RTX 4090 24GB (~$0.69/hr)
+```
+
+Handles: concept image generation, face close-up generation.
+
+#### Container 3: Trellis v2 (post-MVP)
+```
+Base: pytorch CUDA image
++ Trellis v2 model weights
+Registry: quay.io/kokokino/meshborn-trellis:latest
+GPU: RTX 4090/5090 (~$0.69-0.89/hr)
+```
+
+#### Container 4: UniRig (post-MVP)
+```
+Base: pytorch CUDA image
++ UniRig checkpoints
+Registry: quay.io/kokokino/meshborn-unirig:latest
+GPU: RTX 4090 (~$0.69/hr)
+```
+
+### Podman Build & Push
+
+```bash
+# Build
+podman build -t quay.io/kokokino/meshborn-blender:latest -f containers/blender/Containerfile .
+podman build -t quay.io/kokokino/meshborn-hidream:latest -f containers/hidream/Containerfile .
+
+# Push to Quay.io
+podman push quay.io/kokokino/meshborn-blender:latest
+podman push quay.io/kokokino/meshborn-hidream:latest
+```
+
+RunPod Serverless pulls from Quay.io just like Docker Hub — any OCI-compatible registry works.
+
+---
+
+## Storage (Backblaze B2)
+
+Following backlog-beacon's pattern: AWS SDK with S3-compatible API, not ostrio:files for B2 mode.
+
+### NPM Dependencies (same as backlog-beacon)
+```
+@aws-sdk/client-s3
+@aws-sdk/lib-storage
+```
+
+### Bucket Structure
+
+```
+b2://meshborn-avatars/
+  avatars/
+    {userId}/
+      {avatarId}/
+        hero.png              # Approved HiDream concept image
+        face_closeup.png      # High-res face for texture
+        variants/             # Rejected concept alternatives
+          variant_01.png
+          variant_02.png
+        params.json           # MPFB2 body/face parameters (remix key)
+        mesh_pretexture.glb   # Mesh before texturing
+        avatar.glb            # Final TalkingHead-ready GLB
+        avatar_lowpoly.glb    # Low-poly variant if generated
+        thumbnail.jpg         # 256x256 gallery thumbnail
+        metadata.json         # Prompt, settings, timestamps
+```
+
+### Settings Structure
+```json
+{
+  "private": {
+    "storage": {
+      "type": "b2",
+      "b2": {
+        "applicationKeyId": "...",
+        "applicationKey": "...",
+        "bucketName": "meshborn-avatars",
+        "region": "us-east-005"
+      }
+    }
+  }
+}
+```
+
+### Remix Support
+
+`params.json` stores the exact MPFB2 slider values that generated the character. For remixing:
+- Same body, different face → reload params, modify face values, re-enter at stage 4
+- Same face, different appearance → reload params, re-enter at stage 3 (new HiDream image)
+- All intermediate files stored so users can branch from any pipeline stage
+
+---
+
+## Spoke App Structure (New Files)
+
+Built on the existing spoke skeleton. New additions:
+
+```
+meshborn/
+├── imports/
+│   ├── api/
+│   │   ├── avatars/
+│   │   │   ├── collection.js         # Avatars MongoDB collection
+│   │   │   ├── methods.js            # generate, refine, remix, delete
+│   │   │   └── publications.js       # userAvatars, avatarDetail
+│   │   └── jobs/
+│   │       ├── collection.js         # Generation jobs collection
+│   │       ├── methods.js            # createJob, cancelJob
+│   │       └── publications.js       # jobStatus (reactive progress)
+│   ├── lib/
+│   │   ├── runpodClient.js           # RunPod Serverless API client
+│   │   ├── b2Storage.js              # Backblaze B2 upload/download/delete
+│   │   ├── storageClient.js          # S3Client initialization
+│   │   └── promptDecomposer.js       # LLM prompt → MPFB2 params
+│   └── ui/
+│       ├── pages/
+│       │   ├── GeneratorPage.js      # Main generation flow
+│       │   ├── GalleryPage.js        # User's saved avatars
+│       │   └── AvatarDetailPage.js   # Single avatar view + remix
+│       └── components/
+│           ├── PromptInput.js        # Text prompt + style selector
+│           ├── ConceptPreview.js     # HiDream image approval UI
+│           ├── AvatarViewer.js       # Babylon.js GLB viewer
+│           ├── ProgressTracker.js    # Real-time generation progress
+│           ├── ParamSliders.js       # Body/face customization
+│           └── AvatarCard.js         # Gallery thumbnail card
+├── server/
+│   ├── avatarPipeline.js             # Multi-step pipeline orchestrator
+│   ├── runpodWebhooks.js             # Receive RunPod completion callbacks
+│   └── migrations/
+│       └── 2_create_avatars_indexes.js
+├── containers/
+│   ├── blender/
+│   │   ├── Containerfile             # Podman/OCI container definition
+│   │   ├── handler.py                # RunPod serverless handler
+│   │   └── scripts/
+│   │       ├── generate_character.py # MPFB2 API: create humanoid
+│   │       ├── project_textures.py   # Texture projection
+│   │       ├── export_glb.py         # Final GLB export
+│   │       └── validate.py           # Morph target validation
+│   └── hidream/
+│       ├── Containerfile
+│       └── handler.py
+└── public/
+    └── (static assets served by Meteor)
+```
+
+---
+
+## Development Phases
+
+### Phase 0: Foundation, Cloud Setup & Texturing Spike
+
+**Goal**: Establish cloud infrastructure. Prove MPFB2 works headless. De-risk texture projection early.
+
+**Tasks**:
+
+*Cloud infrastructure:*
+- Set up Quay.io account and repository
+- Install Podman locally
+- Build Blender 5 + MPFB2 container with ALL asset packs
+- Deploy to RunPod Serverless as first endpoint
+- Test calling the endpoint from local Meteor dev server
+- Set up Backblaze B2 bucket (meshborn-avatars)
+- Implement `b2Storage.js` and `storageClient.js` (following backlog-beacon pattern)
+- Add RunPod API client module
+- Add Jobs collection + reactive publication for progress tracking
+
+*MPFB2 smoke test:*
+- Generate a character via MPFB2 API in headless Blender 5
+- Verify ARKit shape keys (Faceunits 01) present and correctly named
+- Verify Oculus viseme shape keys (Visemes 02) present
+- Verify separate mesh objects (eyes, teeth, tongue)
+- Export as GLB, load in Babylon.js viewer
+
+*Texturing spike (test both approaches before committing):*
+- **Approach A — MPFB2 built-in materials**: Use MPFB2's procedural skin system (skin tone, eye color, ethnicity parameters) to generate a textured character. Evaluate quality, flexibility, and how "unique" characters can look.
+- **Approach B — Blender UV projection**: Generate a test image with HiDream, project it onto the MPFB2 mesh's UV layout using Blender's texture baking. Evaluate seam quality, face alignment, and overall fidelity.
+- Compare results, document findings. The winner becomes the Phase 2 texturing strategy. Both approaches may end up complementary (MPFB2 materials for body, HiDream projection for face).
+
+**Verification**: Call RunPod endpoint from localhost:3010, receive a GLB with correct morph targets, store it in B2, load it in Babylon.js. Have clear texturing strategy chosen.
+
+### Phase 1: MPFB2 Character Pipeline
+
+**Goal**: Generate parametric characters from structured parameters.
+
+**Tasks**:
+- Write `generate_character.py` (MPFB2 Python API):
+  - Accept body/face parameters as JSON
+  - Generate humanoid with MPFB2
+  - Add system assets (eyes, teeth, tongue, eyelashes)
+  - Add Mixamo rig
+  - Load Faceunits 01 (ARKit shape keys)
+  - Load Visemes 02 (Oculus viseme shape keys)
+  - Export as GLB
+- Write `validate.py`:
+  - Check all 67+ morph targets present with correct names
+  - Check skeleton bone count and naming
+  - Check separate mesh objects (eyes, teeth, tongue)
+- Write `promptDecomposer.js`:
+  - Call Claude API to parse user prompt into MPFB2 parameters
+  - Map natural language ("tall, athletic woman") to slider values
+- Build ParamSliders component for manual parameter adjustment
+- Build ProgressTracker component (reactive via DDP)
+- Store params.json in B2 for each generation
+
+**Verification**: Type "a tall athletic woman with angular features" → get a GLB with correct morph targets and rig. Load in Babylon.js viewer.
+
+### Phase 2: HiDream Appearance Pipeline
+
+**Goal**: Generate unique character appearances and project onto MPFB2 meshes.
+
+**Tasks**:
+- Build HiDream-I1 container, deploy to RunPod
+- Write hero image generation handler:
+  - Full-body T-pose on white background
+  - Face close-up for texture detail
+  - Background removal with rembg
+- Build ConceptPreview component (image approval flow)
+- Write `project_textures.py` (Blender 5 headless):
+  - Project face close-up onto mesh face UV
+  - Project body image onto body UV islands
+  - Bake to texture map (2048x2048)
+- Build end-to-end pipeline orchestrator (`avatarPipeline.js`):
+  - Decompose prompt → generate images → user approval → generate mesh → project textures → export → upload to B2
+- Implement webhook handler for RunPod completion callbacks
+
+**Verification**: Full flow from text prompt to textured, TalkingHead-ready GLB in Babylon.js viewer with working morph targets.
+
+### Phase 3: Gallery, Remix & Polish
+
+**Goal**: Complete user experience.
+
+**Tasks**:
+- Build GalleryPage (user's saved avatars with thumbnails)
+- Build AvatarDetailPage (full viewer + download + remix options)
+- Implement remix flow:
+  - Load params.json from B2
+  - Re-enter pipeline at appropriate stage
+  - "Same body, different look" / "Same face, tweak proportions"
+- Build AvatarViewer with Babylon.js:
+  - GLB loading with morph target animation
+  - Morph target slider controls for testing
+  - Animation playback (idle, etc.)
+- Add TalkingHead demo (iframe embed or native Babylon.js lip-sync)
+- Download options (GLB, separate params.json)
+- Add subscription gating (avatar generation requires subscription)
+- Polish UI with Pico CSS
+
+**Verification**: Full user journey from login → generate → approve → view → remix → download.
+
+### Phase 4: Production Deploy
+
+**Goal**: Live service on Meteor Galaxy.
+
+**Tasks**:
+- Configure production settings (RunPod API keys, B2 credentials, Hub SSO)
+- Set subscription tiers in Kokokino Hub:
+  - Free: 3 avatars/month
+  - Pro: 50 avatars/month + remix
+- Deploy to Galaxy: `meteor deploy meshborn.kokokino.com`
+- Set up monitoring (RunPod dashboard, Galaxy APM)
+- Error handling: automatic fallback/retry
+- Rate limiting on generation endpoints
+
+### Phase 5: AI Mesh Path (Post-MVP)
+
+**Goal**: Support fully AI-generated novel meshes via Trellis v2.
+
+**Tasks**:
+- Build Trellis v2 container, deploy to RunPod
+- Build UniRig container, deploy to RunPod
+- Implement retopology pipeline (Instant Meshes + Blender cleanup)
+- Implement face component separation (MediaPipe)
+- Implement deformation transfer for non-template meshes
+- Quality scoring with automatic fallback to template path
+
+---
+
+## Tech Stack Summary
+
+### Core (All Commercially Clean)
+
+| Component | License | Role |
+|-----------|---------|------|
+| Meteor 3.4 | MIT | Spoke app framework |
+| Mithril.js 2.3 | MIT | UI components |
+| Babylon.js v8 | Apache 2.0 | 3D viewer, morph target animation |
+| MPFB2 | AGPL | Parametric humanoid generation (server-side only) |
+| MPFB2 asset packs | CC0 | ARKit shape keys, Oculus visemes |
+| HiDream-I1 | MIT | Concept image generation |
+| Trellis v2 | MIT | Image → 3D mesh (post-MVP) |
+| UniRig | MIT | Auto-rigging (post-MVP) |
+| Blender 5.0 | GPL | Headless mesh processing (server-side only) |
+| Pico CSS | MIT | Classless styling |
+
+### Infrastructure
+
+| Service | Role |
+|---------|------|
+| Meteor Galaxy | Web app hosting |
+| RunPod Serverless | GPU/CPU compute (scales to zero) |
+| Quay.io | Container registry |
+| Backblaze B2 | File storage (S3-compatible) |
+| Kokokino Hub | SSO + billing |
+| Podman | Container build/run |
+
+### Per-Avatar Cost Estimate (Template Path)
+
+| Step | Time | Cost |
+|------|------|------|
+| HiDream hero + face | ~20s on RTX 4090 | ~$0.004 |
+| MPFB2 character gen | ~30s on CPU | ~$0.002 |
+| Texture projection | ~30s on CPU | ~$0.002 |
+| GLB export | ~15s on CPU | ~$0.001 |
+| **Total** | **~2 min** | **~$0.01** |
+
+---
+
+## Resolved Decisions
+
+1. **MakeHuman asset packs**: Install ALL available packs in the container from the start. More variety, fewer rebuilds.
+
+2. **Texturing approach**: Spike both MPFB2 built-in materials AND Blender UV projection in Phase 0 before committing to either. They may be complementary.
+
+3. **3D generation tool**: Trellis v2 only (MIT license). Hunyuan3D deferred/excluded for now.
+
+4. **Containers**: Podman + Quay.io (not Docker + Docker Hub).
+
+5. **Blender version**: Blender 5 in cloud containers only. No local Blender.
+
+## Notes
+
+- **MPFB2 license (AGPL)**: Runs server-side only in containers, never distributed to users. Fine for SaaS model. Asset packs are CC0.
+- **Deformation transfer / ICT FaceKit**: Not needed for MVP (MPFB2 handles blend shapes natively). May revisit for the post-MVP AI mesh path.
+- **TalkingHead compatibility**: Confirmed via Mika Suominen's own asset packs — same person built both TalkingHead and the MPFB2 packs that bridge to it.
