@@ -21,6 +21,7 @@ The key insight from the brainstorming phase: **MPFB2 (MakeHuman Plugin For Blen
 | GPU compute | **RunPod Serverless** | Pay-per-second, scales to zero, shared by dev and prod |
 | File storage | **Backblaze B2** | S3-compatible, follows backlog-beacon pattern with AWS SDK |
 | 3D viewer | **Babylon.js v8** | Kokokino standard. GLB morph target support built in |
+| LLM layer | **OpenRouter** | Prompt decomposition, HiDream prompt optimization, refinement parsing. Cheap models (GPT-4o-mini), no cold start, vision models for post-MVP. Follows false-colors (a spoke app) pattern |
 | Dev philosophy | **Cloud services everywhere** | Same RunPod endpoints for dev and prod. No crippled local models |
 
 ---
@@ -357,6 +358,73 @@ The `pipelineState` object enables remix re-entry — load an existing avatar, c
 
 ---
 
+## LLM Layer (OpenRouter)
+
+Following the false-colors spoke app pattern: server-side only, native `fetch()`, tiered model fallback, per-user call caps.
+
+### Why OpenRouter over self-hosted LLMs on RunPod
+
+Self-hosting an LLM (e.g., Llama 3.1 on RunPod) has a cold start problem: 30-60 seconds to load the model after idle. Keeping a warm worker costs ~$500/month. OpenRouter costs ~$0.0005 per avatar for prompt decomposition — effectively a rounding error compared to HiDream and Blender compute costs. OpenRouter also provides vision models for the post-MVP image-to-parameters path through the same API.
+
+### What needs an LLM
+
+1. **Prompt decomposition** (every avatar): User text → structured JSON with MPFB2 target values + asset selections + HiDream prompt
+2. **HiDream prompt optimization** (every avatar): Rewrite user text into image-gen-optimized prompt (T-pose, white bg, studio lighting)
+3. **Iterative refinement** (occasional): "Make hair longer" → which params to change and by how much
+4. **Image → parameters** (post-MVP): Vision model extracts proportions from uploaded photo → MPFB2 targets
+
+### Model Fallback Chain
+
+```
+1. GPT-4o-mini          — $0.15/$0.60 per M tokens, excellent structured JSON,
+                          supports response_format: { type: "json_object" }
+2. Gemini Flash 2.0     — comparably cheap, good structured output
+3. Claude Haiku 3.5     — more expensive but very reliable if cheaper models struggle
+```
+
+All three models fail → show user an outage message ("We're experiencing a temporary issue, please try again shortly"). The prompt decomposition is essential to the pipeline — without it, we cannot map user intent to MPFB2 parameters, so there is no degraded mode.
+
+### Settings Structure
+
+```json
+{
+  "private": {
+    "ai": {
+      "openRouterApiKey": "sk-or-v1-...",
+      "openRouterBaseUrl": "https://openrouter.ai/api/v1",
+      "openRouterModels": [
+        "openai/gpt-4o-mini",
+        "google/gemini-2.0-flash-001",
+        "anthropic/claude-3.5-haiku"
+      ],
+      "maxCallsPerUserPerDay": 50,
+      "maxTokensPerCall": 1000,
+      "temperature": 0.3
+    }
+  }
+}
+```
+
+Lower temperature (0.3) than false-colors (0.8) because we need consistent, predictable parameter mapping rather than creative variation.
+
+### Implementation Pattern (from false-colors)
+
+- Native `fetch()` to OpenRouter API (no SDK dependency)
+- Server-side Meteor methods only — API key never reaches client
+- Tiered fallback: try each model in order, catch errors, continue to next
+- Per-user daily call cap to prevent cost runaway
+- All calls include `response_format: { type: "json_object" }` where supported
+
+### Cost Estimate
+
+| Scale | Avatars/day | LLM cost/month |
+|-------|------------|---------------|
+| Demo | 5 | ~$0.08 |
+| Small | 50 | ~$0.75 |
+| Medium | 500 | ~$7.50 |
+
+---
+
 ## Spoke App Structure (New Files)
 
 Built on the existing spoke skeleton. New additions:
@@ -377,7 +445,8 @@ meshborn/
 │   │   ├── runpodClient.js           # RunPod Serverless API client
 │   │   ├── b2Storage.js              # Backblaze B2 upload/download/delete
 │   │   ├── storageClient.js          # S3Client initialization
-│   │   └── promptDecomposer.js       # LLM prompt → MPFB2 params
+│   │   ├── promptDecomposer.js       # LLM prompt → MPFB2 params
+│   │   └── llmProxy.js              # OpenRouter client (fetch-based, model fallback chain)
 │   └── ui/
 │       ├── pages/
 │       │   ├── GeneratorPage.js      # Main generation flow
@@ -469,9 +538,13 @@ meshborn/
   - Check all 67+ morph targets present with correct names
   - Check skeleton bone count and naming
   - Check separate mesh objects (eyes, teeth, tongue)
+- Write `llmProxy.js` (OpenRouter client, following false-colors pattern):
+  - Native fetch, model fallback chain, per-user call caps
+  - All models fail → outage message, no degraded mode
 - Write `promptDecomposer.js`:
-  - Call Claude API to parse user prompt into MPFB2 parameters
-  - Map natural language ("tall, athletic woman") to slider values
+  - Call OpenRouter via llmProxy to parse user prompt into MPFB2 parameters
+  - Map natural language ("tall, athletic woman") to slider values + asset selections + HiDream prompt
+  - System prompt includes curated MPFB2 target list with ranges and descriptions
 - Build ParamSliders component for manual parameter adjustment
 - Build ProgressTracker component (reactive via DDP)
 - Store params.json in B2 for each generation
@@ -565,6 +638,7 @@ meshborn/
 | UniRig | MIT | Auto-rigging (post-MVP) |
 | Blender 5.0 | GPL | Headless mesh processing (server-side only) |
 | Pico CSS | MIT | Classless styling |
+| OpenRouter | N/A (API service) | LLM routing — prompt decomposition, prompt optimization |
 
 ### Infrastructure
 
