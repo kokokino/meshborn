@@ -83,16 +83,20 @@ This is the core pipeline. MPFB2 + Mika Suominen's asset packs handle the entire
         │
         ▼
 4. CHARACTER GENERATION (RunPod: MPFB2 + Blender 5)
-   a. MPFB2 generates parametric humanoid
+   a. MPFB2 generates parametric humanoid via HumanService
       - Body shape, face shape, ethnicity, age via API
-   b. MPFB2 adds system assets
-      - Eyes, teeth, tongue, eyelashes (separate mesh objects)
-   c. MPFB2 adds Mixamo rig
+   b. MPFB2 adds system assets via AssetService
+      - Eyes, teeth, tongue, eyelashes, eyebrows (separate mesh objects)
+   c. MPFB2 adds Mixamo rig via RigService
    d. MPFB2 loads Faceunits 01
       - 52 ARKit blend shape keys on basemesh
    e. MPFB2 loads Visemes 02 (Meta/Oculus)
       - 15 Oculus viseme shape keys: viseme_aa, viseme_CH, viseme_sil, etc.
-   f. Save params.json for future remixing
+   f. MPFB2 selects hair from asset library
+      - Based on prompt decomposition output
+   g. MPFB2 selects clothing from asset library
+      - Based on prompt decomposition output
+   h. Save params.json for future remixing
         │
         ▼
 5. TEXTURE PROJECTION (RunPod: Blender 5)
@@ -126,6 +130,35 @@ Install **all available MakeHuman/MPFB2 asset packs** in the container from the 
 | System assets (eyes, teeth, tongue, eyelashes) | MPFB2 core | CC0 | Separate mesh objects |
 
 **Additional packs (all available)**: clothing, hair, body morphs, skins, targets, etc. These expand character variety and give users more customization options. Bake all packs into the Blender container image so they're available without runtime downloads.
+
+### MPFB2 API Reference
+
+MPFB2 uses a service-oriented architecture with stateless singletons. Key services for our pipeline:
+
+```python
+from mpfb.services.humanservice import HumanService    # Create base human, apply targets
+from mpfb.services.rigservice import RigService        # Add Mixamo rig, weight painting
+from mpfb.services.assetservice import AssetService    # Load eyes, teeth, clothing, hair
+```
+
+Compatible with Blender 4.2 through 5.1. Version 2.0.14+ recommended.
+
+**Example MPFB2 target paths** (used in params.json and prompt decomposition):
+```json
+{
+  "macrodetails/Gender": 0.1,
+  "macrodetails/Age": 0.4,
+  "macrodetails/Weight": 0.3,
+  "macrodetails/Muscle": 0.7,
+  "macrodetails/Proportions": 0.5,
+  "head/head-square": 0.6,
+  "jaw/jaw-width-max": 0.7,
+  "eyes/eyes-size-small": 0.6,
+  "forehead/forehead-height-min": 0.3
+}
+```
+
+These target names map to shape keys on the basemesh. The prompt decomposer must build a dictionary between natural language descriptors and MPFB2's target system.
 
 ### Why This Works
 
@@ -274,6 +307,54 @@ b2://meshborn-avatars/
 - Same face, different appearance → reload params, re-enter at stage 3 (new HiDream image)
 - All intermediate files stored so users can branch from any pipeline stage
 
+### MongoDB Collections (metadata only — binary files in B2)
+
+```javascript
+// AvatarsCollection
+{
+  _id: "abc123",
+  userId: "user456",
+  prompt: "A stocky middle-aged man...",
+  style: "realistic",
+  params: { /* MPFB2 target values */ },
+  assets: { skin: "skins02/middleage_caucasian", hair: "hair01/short_receding", ... },
+  status: "complete",
+  files: {
+    hero: "https://f003.backblazeb2.com/.../hero.png",
+    glb: "https://f003.backblazeb2.com/.../avatar.glb",
+    thumbnail: "https://f003.backblazeb2.com/.../thumbnail.jpg"
+  },
+  pipelineState: {
+    conceptGenerated: true,
+    conceptApproved: true,
+    meshGenerated: true,
+    textured: true,
+    blendshapesApplied: true,
+    exported: true
+  },
+  createdAt: ISODate("..."),
+  generationTimeMs: 85000
+}
+
+// JobsCollection (drives real-time UI progress via DDP)
+{
+  _id: "job789",
+  userId: "user456",
+  avatarId: "abc123",
+  status: "generating_mesh",  // reactive, drives progress bar
+  progress: 55,               // 0-100
+  currentStep: "Adding Mixamo rig",
+  runpodJobIds: {
+    hidream: "rp_xxx",
+    blender: "rp_yyy"
+  },
+  createdAt: ISODate("..."),
+  updatedAt: ISODate("...")
+}
+```
+
+The `pipelineState` object enables remix re-entry — load an existing avatar, check which stages are complete, and re-enter at the right point.
+
 ---
 
 ## Spoke App Structure (New Files)
@@ -351,12 +432,18 @@ meshborn/
 - Add RunPod API client module
 - Add Jobs collection + reactive publication for progress tracking
 
-*MPFB2 smoke test:*
-- Generate a character via MPFB2 API in headless Blender 5
-- Verify ARKit shape keys (Faceunits 01) present and correctly named
-- Verify Oculus viseme shape keys (Visemes 02) present
-- Verify separate mesh objects (eyes, teeth, tongue)
+*MPFB2 smoke test (critical gate — proves or disproves the architecture):*
+- Import MPFB2 services in `--background` mode:
+  `from mpfb.services.humanservice import HumanService`
+- Call `HumanService.create_human()` headlessly
+- **Risk**: Some MPFB2 code uses `bpy.ops` calls that require a UI context. If these crash in `--background` mode, wrap with context overrides or patch the specific service functions (MPFB2 is open source GPLv3). This is the single biggest technical risk — but the architecture strongly suggests it will work, and it will be known within the first day of Phase 0.
+- Apply body/face targets via shape key values
+- Load system assets (eyes, teeth, tongue, eyelashes, eyebrows)
+- Add Mixamo rig
+- Load Faceunits 01 (ARKit shape keys) — verify all 52 present and correctly named
+- Load Visemes 02 (Oculus visemes) — verify all 15 present
 - Export as GLB, load in Babylon.js viewer
+- Load in TalkingHead test page to verify lip-sync works
 
 *Texturing spike (test both approaches before committing):*
 - **Approach A — MPFB2 built-in materials**: Use MPFB2's procedural skin system (skin tone, eye color, ethnicity parameters) to generate a textured character. Evaluate quality, flexibility, and how "unique" characters can look.
@@ -471,7 +558,7 @@ meshborn/
 | Meteor 3.4 | MIT | Spoke app framework |
 | Mithril.js 2.3 | MIT | UI components |
 | Babylon.js v8 | Apache 2.0 | 3D viewer, morph target animation |
-| MPFB2 | AGPL | Parametric humanoid generation (server-side only) |
+| MPFB2 | GPLv3 (code), CC0 (assets + output) | Parametric humanoid generation (server-side only) |
 | MPFB2 asset packs | CC0 | ARKit shape keys, Oculus visemes |
 | HiDream-I1 | MIT | Concept image generation |
 | Trellis v2 | MIT | Image → 3D mesh (post-MVP) |
@@ -502,6 +589,19 @@ meshborn/
 
 ---
 
+## Risks and Mitigations
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|-----------|
+| MPFB2 fails to run headlessly (`bpy.ops` context issues) | Low-Medium | Critical | Phase 0 validates this first. Wrap failing calls with context overrides. Worst case: patch specific MPFB2 service functions (open source GPLv3). |
+| Faceunits 01 doesn't contain all 52 ARKit shapes | Low | High | Verify in Phase 0. Same author created both TalkingHead and the packs — full coverage is near-certain. If subset, supplement missing shapes. |
+| MPFB2 Mixamo rig weight painting quality | Medium | Medium | Known to be "crude in places" per MPFB2 release notes. Works for common body types. Extreme proportions may need weight cleanup scripts. |
+| HiDream concept images poor for texture projection | Medium | Medium | Phase 0 texturing spike de-risks this. Fallback to MPFB2's procedural skin materials. Can improve with prompt engineering. |
+| RunPod cold start latency | Low | Low | FlashBoot reduces to sub-200ms for pre-warmed workers. First request after long idle may take 30-60s for model loading. |
+| Viseme naming mismatch with TalkingHead | Very Low | Low | Same author created both. If somehow different, simple rename script in export. |
+
+---
+
 ## Resolved Decisions
 
 1. **MakeHuman asset packs**: Install ALL available packs in the container from the start. More variety, fewer rebuilds.
@@ -516,6 +616,6 @@ meshborn/
 
 ## Notes
 
-- **MPFB2 license (AGPL)**: Runs server-side only in containers, never distributed to users. Fine for SaaS model. Asset packs are CC0.
+- **MPFB2 license (GPLv3)**: Code is GPLv3, runs server-side only in containers, never distributed to users. All assets (meshes, textures, targets, rigs) are CC0. Generated characters have no restrictions — the MakeHuman team explicitly states that output contains no trace of program logic and can be sold, modified, and sublicensed freely.
 - **Deformation transfer / ICT FaceKit**: Not needed for MVP (MPFB2 handles blend shapes natively). May revisit for the post-MVP AI mesh path.
 - **TalkingHead compatibility**: Confirmed via Mika Suominen's own asset packs — same person built both TalkingHead and the MPFB2 packs that bridge to it.
