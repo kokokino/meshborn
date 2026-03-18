@@ -21,7 +21,7 @@ The key insight from the brainstorming phase: **MPFB2 (MakeHuman Plugin For Blen
 | GPU compute | **RunPod Serverless** | Pay-per-second, scales to zero, shared by dev and prod |
 | File storage | **Backblaze B2** | S3-compatible, follows backlog-beacon pattern with AWS SDK |
 | 3D viewer | **Babylon.js v8** | Kokokino standard. GLB morph target support built in |
-| LLM layer | **OpenRouter** | Prompt decomposition, HiDream prompt optimization, refinement parsing. Cheap models (GPT-4o-mini), no cold start, vision models for post-MVP. Follows false-colors (a spoke app) pattern |
+| LLM layer | **OpenRouter** | Prompt decomposition, HiDream prompt optimization, refinement parsing. Cheap models (Gemini 2.5 Flash Lite, GPT-5.4 nano, Mistral Small 4), no cold start, vision models for post-MVP. Follows false-colors (a spoke app) pattern |
 | Dev philosophy | **Cloud services everywhere** | Same RunPod endpoints for dev and prod. No crippled local models |
 
 ---
@@ -373,16 +373,27 @@ Self-hosting an LLM (e.g., Llama 3.1 on RunPod) has a cold start problem: 30-60 
 3. **Iterative refinement** (occasional): "Make hair longer" → which params to change and by how much
 4. **Image → parameters** (post-MVP): Vision model extracts proportions from uploaded photo → MPFB2 targets
 
-### Model Fallback Chain
+### Model Fallback Chain (updated March 2026)
 
 ```
-1. GPT-4o-mini          — $0.15/$0.60 per M tokens, excellent structured JSON,
-                          supports response_format: { type: "json_object" }
-2. Gemini Flash 2.0     — comparably cheap, good structured output
-3. Claude Haiku 3.5     — more expensive but very reliable if cheaper models struggle
+1. Gemini 2.5 Flash Lite  — $0.10/$0.40 per M tokens, ultra-fast (358 tok/s),
+                             Google's structured output is very reliable, 1M context
+2. GPT-5.4 nano           — $0.20/$1.25 per M tokens, outperforms previous GPT-5 mini,
+                             OpenAI's strict JSON schema mode, 400K context
+3. Mistral Small 4         — $0.15/$0.60 per M tokens, 119B MoE (6.5B active),
+                             native tool calling + structured output, Apache 2.0
 ```
+
+Three different providers (Google, OpenAI, Mistral) for maximum uptime resilience. All support `response_format: { type: "json_schema" }` with strict mode — a significant upgrade over the older `{ type: "json_object" }` approach, letting us enforce exact MPFB2 parameter schemas.
 
 All three models fail → show user an outage message ("We're experiencing a temporary issue, please try again shortly"). The prompt decomposition is essential to the pipeline — without it, we cannot map user intent to MPFB2 parameters, so there is no degraded mode.
+
+**Models considered but not selected:**
+- GPT-4o-mini ($0.15/$0.60) — still available but outclassed by GPT-5.4 nano and Gemini 2.5 Flash Lite
+- Claude Haiku 4.5 ($1.00/$5.00) — replaced Haiku 3.5 with a 10x price increase, no longer budget-friendly
+- GPT-5.4 mini ($0.75/$4.50) — excellent quality but overkill for prompt decomposition
+- Qwen3.5-Flash ($0.065/$0.26) — very cheap but fewer OpenRouter providers, less reliability data
+- DeepSeek V3.2 ($0.255/$0.40) — strong reasoning but lower structured output compliance (88.7% in benchmarks)
 
 ### Settings Structure
 
@@ -393,9 +404,9 @@ All three models fail → show user an outage message ("We're experiencing a tem
       "openRouterApiKey": "sk-or-v1-...",
       "openRouterBaseUrl": "https://openrouter.ai/api/v1",
       "openRouterModels": [
-        "openai/gpt-4o-mini",
-        "google/gemini-2.0-flash-001",
-        "anthropic/claude-3.5-haiku"
+        "google/gemini-2.5-flash-lite",
+        "openai/gpt-5.4-nano",
+        "mistralai/mistral-small-2603"
       ],
       "maxCallsPerUserPerDay": 50,
       "maxTokensPerCall": 1000,
@@ -413,15 +424,15 @@ Lower temperature (0.3) than false-colors (0.8) because we need consistent, pred
 - Server-side Meteor methods only — API key never reaches client
 - Tiered fallback: try each model in order, catch errors, continue to next
 - Per-user daily call cap to prevent cost runaway
-- All calls include `response_format: { type: "json_object" }` where supported
+- All calls include `response_format: { type: "json_schema" }` with strict mode where supported (all current recommended models support this)
 
-### Cost Estimate
+### Cost Estimate (primary model: Gemini 2.5 Flash Lite)
 
 | Scale | Avatars/day | LLM cost/month |
 |-------|------------|---------------|
-| Demo | 5 | ~$0.08 |
-| Small | 50 | ~$0.75 |
-| Medium | 500 | ~$7.50 |
+| Demo | 5 | ~$0.05 |
+| Small | 50 | ~$0.55 |
+| Medium | 500 | ~$5.50 |
 
 ---
 
