@@ -378,13 +378,13 @@ Self-hosting an LLM (e.g., Llama 3.1 on RunPod) has a cold start problem: 30-60 
 ```
 1. Gemini 2.5 Flash Lite  — $0.10/$0.40 per M tokens, ultra-fast (358 tok/s),
                              Google's structured output is very reliable, 1M context
-2. GPT-5.4 nano           — $0.20/$1.25 per M tokens, outperforms previous GPT-5 mini,
-                             OpenAI's strict JSON schema mode, 400K context
-3. Mistral Small 4         — $0.15/$0.60 per M tokens, 119B MoE (6.5B active),
+2. Mistral Small 4         — $0.15/$0.60 per M tokens, 119B MoE (6.5B active),
                              native tool calling + structured output, Apache 2.0
+3. GPT-5.4 nano           — $0.20/$1.25 per M tokens, outperforms previous GPT-5 mini,
+                             OpenAI's most battle-tested strict JSON schema mode, 400K context
 ```
 
-Three different providers (Google, OpenAI, Mistral) for maximum uptime resilience. All support `response_format: { type: "json_schema" }` with strict mode — a significant upgrade over the older `{ type: "json_object" }` approach, letting us enforce exact MPFB2 parameter schemas.
+Ordered by cost, with three different providers (Google, Mistral, OpenAI) for maximum uptime resilience. GPT-5.4 nano as last resort: most expensive but most proven structured output implementation. All support `response_format: { type: "json_schema" }` with strict mode — a significant upgrade over the older `{ type: "json_object" }` approach, letting us enforce exact MPFB2 parameter schemas.
 
 All three models fail → show user an outage message ("We're experiencing a temporary issue, please try again shortly"). The prompt decomposition is essential to the pipeline — without it, we cannot map user intent to MPFB2 parameters, so there is no degraded mode.
 
@@ -405,8 +405,8 @@ All three models fail → show user an outage message ("We're experiencing a tem
       "openRouterBaseUrl": "https://openrouter.ai/api/v1",
       "openRouterModels": [
         "google/gemini-2.5-flash-lite",
-        "openai/gpt-5.4-nano",
-        "mistralai/mistral-small-2603"
+        "mistralai/mistral-small-2603",
+        "openai/gpt-5.4-nano"
       ],
       "maxCallsPerUserPerDay": 50,
       "maxTokensPerCall": 1000,
