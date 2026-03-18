@@ -57,7 +57,7 @@ The key insight from the brainstorming phase: **MPFB2 (MakeHuman Plugin For Blen
   └────────────────────┘
 ```
 
-Both dev (localhost:3010) and production (meshborn.kokokino.com) call the same RunPod endpoints and write to the same B2 bucket (with environment-prefixed paths).
+Both dev (localhost:3050) and production (meshborn.kokokino.com) call the same RunPod endpoints and write to the same B2 bucket (with environment-prefixed paths).
 
 ---
 
@@ -519,7 +519,7 @@ meshborn/
 - **Approach B — Blender UV projection**: Generate a test image with HiDream, project it onto the MPFB2 mesh's UV layout using Blender's texture baking. Evaluate seam quality, face alignment, and overall fidelity.
 - Compare results, document findings. The winner becomes the Phase 2 texturing strategy. Both approaches may end up complementary (MPFB2 materials for body, HiDream projection for face).
 
-**Verification**: Call RunPod endpoint from localhost:3010, receive a GLB with correct morph targets, store it in B2, load it in Babylon.js. Have clear texturing strategy chosen.
+**Verification**: Call RunPod endpoint from localhost:3050, receive a GLB with correct morph targets, store it in B2, load it in Babylon.js. Have clear texturing strategy chosen.
 
 ### Phase 1: MPFB2 Character Pipeline
 
