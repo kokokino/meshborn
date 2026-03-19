@@ -49,7 +49,7 @@ podman info  # verify
 
 - Create account at quay.io (or use existing `kokokino` org)
 - Create repository: `kokokino/meshborn-blender`
-- Set visibility to private initially
+- Set visibility to public (all Kokokino code is open source)
 - Full image path: `quay.io/kokokino/meshborn-blender`
 
 ### 1.3 Create Backblaze B2 Bucket
